@@ -1,4 +1,4 @@
-// napps/creator-signals/src/lib/creator-signals-derive.ts
+// napplets/creator-signals/src/lib/creator-signals-derive.ts
 // Pure derivation + parsing helpers for creator-signals, split out of the store
 // module so neither file grows unbounded. No relay/identity/storage I/O here
 // except snapshot persistence, which is self-contained.
