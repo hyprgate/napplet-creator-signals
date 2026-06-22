@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { Subscription } from '@napplet/sdk';
   import { inc as ipc } from '@napplet/sdk';
   import {
     NOTE_VIEWER_OPEN_TOPIC,
@@ -20,6 +21,14 @@
     type CreatorSignal,
     type CreatorSignalsState,
   } from './lib/creator-signals-store';
+  import { subscribeProfileMetadata } from './lib/profile-metadata';
+  import {
+    fallbackNpub,
+    profileLabel,
+    safeProfilePicture,
+    uniqueSignalAuthors,
+    type ProfileContent,
+  } from './lib/profile-display';
 
   let state = $state<CreatorSignalsState>({
     items: [],
@@ -42,12 +51,27 @@
   const selected = $derived(selectedCreatorItem(state));
   const selectedSignals = $derived(creatorSignalsForItem(selected, state.signals, state.filter));
   const orphanSignals = $derived(unattachedSignals(state));
+  const visibleSignalAuthors = $derived(uniqueSignalAuthors([...selectedSignals, ...orphanSignals.slice(0, 18)]));
   const totals = $derived(creatorSignalCounts(state.signals));
   const coverage = $derived(coverageLabel(state));
+  let profiles = $state(new Map<string, ProfileContent>());
+  let profileSub: Subscription | null = null;
 
   onMount(() => {
     store.load();
-    return () => store.destroy();
+    return () => {
+      profileSub?.close();
+      store.destroy();
+    };
+  });
+
+  $effect(() => {
+    const authors = visibleSignalAuthors;
+    profileSub?.close();
+    profileSub = subscribeProfileMetadata(authors, (pubkey, profile) => {
+      profiles = new Map(profiles).set(pubkey, profile);
+    });
+    return () => profileSub?.close();
   });
 
   function setFilter(filter: CreatorFilter): void {
@@ -73,6 +97,14 @@
 
   function openSignalAuthor(signal: CreatorSignal): void {
     ipc.emit('profile:open', [], JSON.stringify({ pubkey: signal.author }));
+  }
+
+  function authorLabel(pubkey: string): string {
+    return profileLabel(profiles.get(pubkey), pubkey);
+  }
+
+  function authorPicture(pubkey: string): string | null {
+    return safeProfilePicture(profiles.get(pubkey));
   }
 
   function delta(kind: keyof typeof totals): number | null {
@@ -179,9 +211,30 @@
         <code>{selected.address ?? selected.id}</code>
         <div class="signal-list">
           {#each selectedSignals as signal}
+            {@const npub = fallbackNpub(signal.author)}
+            {@const label = authorLabel(signal.author)}
+            {@const picture = authorPicture(signal.author)}
             <article>
-              <button type="button" class="author" style={pubkeyColorStyle(signal.author)} onclick={() => openSignalAuthor(signal)}>
-                {signal.author}
+              <button
+                type="button"
+                class="author"
+                style={pubkeyColorStyle(signal.author)}
+                title={npub}
+                data-signal-author={signal.author}
+                data-signal-author-label={label}
+                onclick={() => openSignalAuthor(signal)}
+              >
+                {#if picture}
+                  <img src={picture} alt="" loading="lazy" />
+                {:else}
+                  <span class="avatar-fallback">{label.slice(0, 1).toUpperCase()}</span>
+                {/if}
+                <span class="identity-text">
+                  <strong>{label}</strong>
+                  {#if label !== npub}
+                    <small>{npub}</small>
+                  {/if}
+                </span>
               </button>
               <span>{signal.kind} / {formatAge(signal.createdAt)}</span>
               <p>{signal.summary}</p>
@@ -200,10 +253,31 @@
       <p>Follow-list mentions and signals whose target content was not in the current query window.</p>
       <div class="loose-list">
         {#each orphanSignals.slice(0, 18) as signal}
+          {@const npub = fallbackNpub(signal.author)}
+          {@const label = authorLabel(signal.author)}
+          {@const picture = authorPicture(signal.author)}
           <article>
             <span>{signal.kind} / {formatAge(signal.createdAt)}</span>
-            <button type="button" class="author" style={pubkeyColorStyle(signal.author)} onclick={() => openSignalAuthor(signal)}>
-              {signal.author}
+            <button
+              type="button"
+              class="author"
+              style={pubkeyColorStyle(signal.author)}
+              title={npub}
+              data-signal-author={signal.author}
+              data-signal-author-label={label}
+              onclick={() => openSignalAuthor(signal)}
+            >
+              {#if picture}
+                <img src={picture} alt="" loading="lazy" />
+              {:else}
+                <span class="avatar-fallback">{label.slice(0, 1).toUpperCase()}</span>
+              {/if}
+              <span class="identity-text">
+                <strong>{label}</strong>
+                {#if label !== npub}
+                  <small>{npub}</small>
+                {/if}
+              </span>
             </button>
             <p>{signal.summary}</p>
           </article>
@@ -382,7 +456,7 @@
     padding: 10px;
   }
 
-  article span {
+  article > span {
     color: var(--hg-accent, #9ee493);
     display: block;
     font-size: 11px;
@@ -391,14 +465,61 @@
   }
 
   .author {
-    border: 0;
-    background: transparent;
-    padding: 0;
+    display: inline-grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    min-height: 32px;
+    border: 1px solid transparent;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    padding: 3px 6px 3px 3px;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     text-align: left;
     white-space: nowrap;
+  }
+
+  .author:hover {
+    border-color: currentColor;
+  }
+
+  .author img, .avatar-fallback {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+
+  .avatar-fallback {
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, currentColor 20%, #0b0b0b);
+    color: var(--hg-text, #f3f1e8);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .identity-text {
+    min-width: 0;
+    display: grid;
+    gap: 1px;
+    text-transform: none;
+  }
+
+  .identity-text strong, .identity-text small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .identity-text strong {
+    color: var(--hg-text, #f3f1e8);
+    font-size: 12px;
+  }
+
+  .identity-text small {
+    color: var(--hg-text-muted, #b8b1a4);
+    font-size: 10px;
   }
 
   article p {
