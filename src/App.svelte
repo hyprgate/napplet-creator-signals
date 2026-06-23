@@ -37,6 +37,7 @@
     filter: 'all',
     query: '',
     loading: true,
+    loadingPhase: 'identity',
     error: null,
     coverageRelays: [],
     queryWindowDays: 30,
@@ -121,6 +122,14 @@
     if (hours < 48) return `${hours}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
   }
+
+  function loadingMessage(phase: CreatorSignalsState['loadingPhase']): string {
+    if (phase === 'identity') return 'Waiting for runtime identity...';
+    if (phase === 'content') return 'Loading recent creator content...';
+    if (phase === 'signals') return 'Hydrating reactions, reposts, zaps, and follows...';
+    if (phase === 'comments') return 'Hydrating NIP-22 comments...';
+    return 'Loading creator signals...';
+  }
 </script>
 
 <main class="signals-shell">
@@ -188,7 +197,7 @@
         </button>
       {/each}
       {#if state.loading}
-        <p class="empty">Loading creator signals...</p>
+        <p class="empty">{loadingMessage(state.loadingPhase)}</p>
       {:else if state.error}
         <p class="empty">{state.error}</p>
       {:else if items.length === 0}
@@ -207,6 +216,9 @@
         </div>
         <p class="coverage-note">
           Counts reflect events returned by {coverage}; they are coverage signals, not global totals.
+          {#if state.loading}
+            Lower-priority signal coverage is still loading.
+          {/if}
         </p>
         <code>{selected.address ?? selected.id}</code>
         <div class="signal-list">
