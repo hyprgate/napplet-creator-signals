@@ -1,6 +1,7 @@
 import type { NostrEvent } from '@hyprgate/types';
 import { identity, relay, type Subscription } from "@napplet/sdk";
 import {
+  isCanonicalHexPubkey,
   KIND_CONTACTS,
   KIND_GENERIC_REPOST,
   KIND_NIP22_COMMENT,
@@ -8,6 +9,7 @@ import {
   KIND_REPOST,
   KIND_TEXT_NOTE,
   KIND_ZAP_RECEIPT,
+  waitForPublicKey,
 } from '@hyprgate/utils';
 import {
   contentFromEvent,
@@ -57,6 +59,7 @@ export interface RelayMode {
 export type CreatorContentType = 'note' | 'article';
 export type CreatorSignalKind = 'reply' | 'comment' | 'reaction' | 'repost' | 'zap' | 'follow';
 export type CreatorFilter = CreatorSignalKind | 'all';
+export type CreatorLoadingPhase = 'idle' | 'identity' | 'content' | 'signals' | 'comments' | 'complete' | 'unavailable';
 
 export interface CreatorContent {
   id: string;
@@ -91,6 +94,7 @@ export interface CreatorSignalsState {
   filter: CreatorFilter;
   query: string;
   loading: boolean;
+  loadingPhase: CreatorLoadingPhase;
   error: string | null;
   coverageRelays: string[];
   queryWindowDays: number;
@@ -111,6 +115,9 @@ export const KIND_LONGFORM = 30023;
 export const CREATOR_SNAPSHOT_KEY = 'creator-signals:snapshot:v1';
 export const QUERY_WINDOW_DAYS = 30;
 export const SECONDS_PER_DAY = 86_400;
+export const CREATOR_IDENTITY_TIMEOUT_MS = 2500;
+export const CREATOR_IDENTITY_RETRY_INTERVAL_MS = 100;
+export const CREATOR_SIGNAL_STAGE_DELAY_MS = 250;
 const SIGNAL_KINDS = [
   KIND_TEXT_NOTE,
   KIND_NIP22_COMMENT,
@@ -137,6 +144,7 @@ export function createInitialCreatorSignalsState(): CreatorSignalsState {
     filter: 'all',
     query: '',
     loading: false,
+    loadingPhase: 'idle',
     error: null,
     coverageRelays: [],
     queryWindowDays: QUERY_WINDOW_DAYS,
@@ -150,8 +158,29 @@ interface CreatorSignalsContext {
   contents: Map<string, CreatorContent>;
   signals: Map<string, CreatorSignal>;
   subs: Subscription[];
+  stageTimers: ReturnType<typeof setTimeout>[];
   pendingEose: number;
+  pendingStages: number;
+  loadGeneration: number;
+  rebuildScheduled: boolean;
+  persistAfterRebuild: boolean;
   notify(): void;
+}
+
+function scheduleRebuild(ctx: CreatorSignalsContext): void {
+  if (ctx.rebuildScheduled) return;
+  ctx.rebuildScheduled = true;
+  const generation = ctx.loadGeneration;
+  queueMicrotask(() => {
+    if (generation !== ctx.loadGeneration) return;
+    ctx.rebuildScheduled = false;
+    rebuild(ctx);
+    if (ctx.persistAfterRebuild) {
+      ctx.persistAfterRebuild = false;
+      persistSnapshot(createSnapshot(ctx.state.signals));
+    }
+    ctx.notify();
+  });
 }
 
 function rebuild(ctx: CreatorSignalsContext): void {
@@ -164,37 +193,84 @@ function rebuild(ctx: CreatorSignalsContext): void {
 }
 
 function destroyStore(ctx: CreatorSignalsContext): void {
+  ctx.loadGeneration += 1;
   for (const sub of ctx.subs.splice(0)) sub.close();
+  for (const timer of ctx.stageTimers.splice(0)) clearTimeout(timer);
   ctx.pendingEose = 0;
+  ctx.pendingStages = 0;
+  ctx.rebuildScheduled = false;
+  ctx.persistAfterRebuild = false;
+}
+
+function completeStage(ctx: CreatorSignalsContext): void {
+  ctx.pendingStages = Math.max(0, ctx.pendingStages - 1);
+  if (ctx.pendingEose === 0 && ctx.pendingStages === 0) {
+    ctx.state.loading = false;
+    ctx.state.loadingPhase = 'complete';
+    ctx.persistAfterRebuild = true;
+  }
 }
 
 function subscribe(ctx: CreatorSignalsContext, filter: NostrFilter, onEvent: (event: NostrEvent) => void): void {
   ctx.pendingEose += 1;
-  const sub = relay.subscribe(
-    filter,
-    (event) => {
-      onEvent(event);
-      rebuild(ctx);
-      ctx.notify();
-    },
-    () => {
-      ctx.pendingEose = Math.max(0, ctx.pendingEose - 1);
-      if (ctx.pendingEose === 0) {
-        ctx.state.loading = false;
-        persistSnapshot(createSnapshot(ctx.state.signals));
-      }
-      rebuild(ctx);
-      ctx.notify();
-    },
-  );
-  ctx.subs.push(sub);
+  try {
+    const sub = relay.subscribe(
+      filter,
+      (event) => {
+        onEvent(event);
+        scheduleRebuild(ctx);
+      },
+      () => {
+        ctx.pendingEose = Math.max(0, ctx.pendingEose - 1);
+        completeStage(ctx);
+        scheduleRebuild(ctx);
+      },
+    );
+    ctx.subs.push(sub);
+  } catch (error) {
+    ctx.pendingEose = Math.max(0, ctx.pendingEose - 1);
+    ctx.state.error = error instanceof Error
+      ? `Creator Signals loaded with partial coverage: ${error.message}`
+      : 'Creator Signals loaded with partial coverage.';
+    completeStage(ctx);
+    scheduleRebuild(ctx);
+  }
+}
+
+function runStage(
+  ctx: CreatorSignalsContext,
+  generation: number,
+  phase: CreatorLoadingPhase,
+  run: () => void,
+): void {
+  if (generation !== ctx.loadGeneration) return;
+  ctx.state.loadingPhase = phase;
+  run();
+  scheduleRebuild(ctx);
+}
+
+function scheduleStage(
+  ctx: CreatorSignalsContext,
+  generation: number,
+  delayMs: number,
+  phase: CreatorLoadingPhase,
+  run: () => void,
+): void {
+  const timer = setTimeout(() => {
+    const index = ctx.stageTimers.indexOf(timer);
+    if (index >= 0) ctx.stageTimers.splice(index, 1);
+    runStage(ctx, generation, phase, run);
+  }, delayMs);
+  ctx.stageTimers.push(timer);
 }
 
 async function load(ctx: CreatorSignalsContext): Promise<void> {
   destroyStore(ctx);
+  const generation = ctx.loadGeneration;
   ctx.contents.clear();
   ctx.signals.clear();
   ctx.state.loading = true;
+  ctx.state.loadingPhase = 'identity';
   ctx.state.error = null;
   ctx.state.selectedId = null;
   ctx.state.snapshot = await restoreSnapshot();
@@ -202,27 +278,48 @@ async function load(ctx: CreatorSignalsContext): Promise<void> {
   ctx.notify();
 
   try {
-    const [self, relayMap] = await Promise.all([
-      identity.getPublicKey(),
-      identity.getRelays().catch(() => ({} as Record<string, RelayMode>)),
-    ]);
+    const self = await waitForPublicKey(identity, {
+      timeoutMs: CREATOR_IDENTITY_TIMEOUT_MS,
+      intervalMs: CREATOR_IDENTITY_RETRY_INTERVAL_MS,
+      isValidPubkey: isCanonicalHexPubkey,
+    });
+    if (generation !== ctx.loadGeneration) return;
+    if (!self) {
+      ctx.state.loading = false;
+      ctx.state.loadingPhase = 'unavailable';
+      ctx.state.error = 'Identity is not ready yet. Reopen Creator Signals once the runtime identity service is ready.';
+      ctx.notify();
+      return;
+    }
+
+    const relayMap = await identity.getRelays().catch(() => ({} as Record<string, RelayMode>));
+    if (generation !== ctx.loadGeneration) return;
     ctx.state.coverageRelays = readableRelays(relayMap);
     const since = querySince();
+    ctx.pendingStages = 3;
 
-    subscribe(ctx, { authors: [self], kinds: [KIND_TEXT_NOTE, KIND_LONGFORM], since, limit: 80 }, (event) => {
-      const content = contentFromEvent(event, ctx.state.coverageRelays);
-      if (content) ctx.contents.set(content.id, content);
+    runStage(ctx, generation, 'content', () => {
+      subscribe(ctx, { authors: [self], kinds: [KIND_TEXT_NOTE, KIND_LONGFORM], since, limit: 80 }, (event) => {
+        const content = contentFromEvent(event, ctx.state.coverageRelays);
+        if (content) ctx.contents.set(content.id, content);
+      });
     });
-    subscribe(ctx, { kinds: [...SIGNAL_KINDS], '#p': [self], since, limit: 260 }, (event) => {
-      const signal = signalFromEvent(event, self);
-      if (signal) ctx.signals.set(signal.id, signal);
+    scheduleStage(ctx, generation, CREATOR_SIGNAL_STAGE_DELAY_MS, 'signals', () => {
+      subscribe(ctx, { kinds: [...SIGNAL_KINDS], '#p': [self], since, limit: 180 }, (event) => {
+        const signal = signalFromEvent(event, self);
+        if (signal) ctx.signals.set(signal.id, signal);
+      });
     });
-    subscribe(ctx, { kinds: [KIND_NIP22_COMMENT], '#P': [self], since, limit: 160 }, (event) => {
-      const signal = signalFromEvent(event, self);
-      if (signal) ctx.signals.set(signal.id, signal);
+    scheduleStage(ctx, generation, CREATOR_SIGNAL_STAGE_DELAY_MS * 2, 'comments', () => {
+      subscribe(ctx, { kinds: [KIND_NIP22_COMMENT], '#P': [self], since, limit: 120 }, (event) => {
+        const signal = signalFromEvent(event, self);
+        if (signal) ctx.signals.set(signal.id, signal);
+      });
     });
   } catch (error) {
+    if (generation !== ctx.loadGeneration) return;
     ctx.state.loading = false;
+    ctx.state.loadingPhase = 'unavailable';
     ctx.state.error = error instanceof Error ? error.message : 'Unable to load creator signals.';
     ctx.notify();
   }
@@ -234,7 +331,12 @@ export function createCreatorSignalsStore(onUpdate?: () => void): CreatorSignals
     contents: new Map<string, CreatorContent>(),
     signals: new Map<string, CreatorSignal>(),
     subs: [],
+    stageTimers: [],
     pendingEose: 0,
+    pendingStages: 0,
+    loadGeneration: 0,
+    rebuildScheduled: false,
+    persistAfterRebuild: false,
     notify: () => onUpdate?.(),
   };
 
