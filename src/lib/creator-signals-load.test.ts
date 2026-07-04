@@ -21,7 +21,7 @@ const sdk = vi.hoisted(() => ({
   subscribe: vi.fn(),
   subscriptions: [] as Array<{
     filter: Record<string, unknown>;
-    onEvent: (event: NostrEvent) => void;
+    onEvent: (result: { event: NostrEvent }) => void;
     onEose: () => void;
     close: ReturnType<typeof vi.fn>;
   }>,
@@ -69,7 +69,7 @@ describe('creator signals load scheduling', () => {
     sdk.setItem.mockResolvedValue(undefined);
     sdk.subscribe.mockImplementation((
       filter: Record<string, unknown>,
-      onEvent: (event: NostrEvent) => void,
+      onEvent: (result: { event: NostrEvent }) => void,
       onEose: () => void,
     ) => {
       const close = vi.fn();
@@ -161,8 +161,8 @@ describe('creator signals load scheduling', () => {
     await flushMicrotasks();
     onUpdate.mockClear();
 
-    sdk.subscriptions[0]!.onEvent(nostrEvent({ id: '1'.repeat(64), content: 'first' }));
-    sdk.subscriptions[0]!.onEvent(nostrEvent({ id: '2'.repeat(64), content: 'second' }));
+    sdk.subscriptions[0]!.onEvent({ event: nostrEvent({ id: '1'.repeat(64), content: 'first' }) });
+    sdk.subscriptions[0]!.onEvent({ event: nostrEvent({ id: '2'.repeat(64), content: 'second' }) });
 
     expect(onUpdate).not.toHaveBeenCalled();
     await flushMicrotasks();

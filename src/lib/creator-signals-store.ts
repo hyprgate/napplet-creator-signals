@@ -216,7 +216,8 @@ function subscribe(ctx: CreatorSignalsContext, filter: NostrFilter, onEvent: (ev
   try {
     const sub = relay.subscribe(
       filter,
-      (event) => {
+      (result) => {
+        const event = result.event as NostrEvent;
         onEvent(event);
         scheduleRebuild(ctx);
       },

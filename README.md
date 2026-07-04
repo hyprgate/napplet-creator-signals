@@ -1,3 +1,9 @@
+<!-- HYPRGATE NAPPLET MIRROR NOTICE:START -->
+> This repository is a read-only mirror of the `creator-signals` napplet from `hyprgate/gui`.
+> Open issues and pull requests in https://github.com/hyprgate/gui.
+> Do not push commits to this standalone napplet repository; direct changes are overwritten by Hyprgate's mirror workflow.
+<!-- HYPRGATE NAPPLET MIRROR NOTICE:END -->
+
 # napplet-creator-signals
 
 [![CI](https://github.com/hyprgate/napplet-creator-signals/actions/workflows/ci.yml/badge.svg)](https://github.com/hyprgate/napplet-creator-signals/actions/workflows/ci.yml)
@@ -15,6 +21,15 @@ cd gui
 pnpm install --frozen-lockfile
 pnpm --filter @hyprgate/napp-creator-signals build
 ```
+
+## Paja runtime
+
+```bash
+pnpm --filter @hyprgate/napp-creator-signals paja
+```
+
+This starts Kehto Paja and the napplet's Vite dev server together, using
+the port configured in `vite.config.ts`.
 
 ## Testing
 
