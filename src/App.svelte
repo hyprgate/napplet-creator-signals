@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Subscription } from '@napplet/sdk';
-  import { inc as ipc } from '@napplet/sdk';
+  import { intent, type Subscription } from '@napplet/sdk';
+  import { parseIntentResult, type IntentRequest } from '@hyprgate/types';
   import {
-    NOTE_VIEWER_OPEN_TOPIC,
+    createNoteViewerOpenIntentRequest,
     createNoteViewerOpenPayload,
+    createProfileIntentRequest,
     pubkeyColorStyle,
   } from '@hyprgate/utils';
   import {
@@ -87,17 +88,28 @@
     store.select(item.id);
   }
 
-  function openItem(item: CreatorContent): void {
+  async function invokeNavigation(request: IntentRequest | null): Promise<void> {
+    if (!request) return;
+    try {
+      const result = parseIntentResult(await intent.invoke(request));
+      if (!result || result.archetype !== request.archetype || result.action !== (request.action ?? 'open')) return;
+      if (!result.ok || !result.handled) return;
+    } catch {
+      // Keep the existing no-op behavior when navigation is unavailable.
+    }
+  }
+
+  async function openItem(item: CreatorContent): Promise<void> {
     const payload = createNoteViewerOpenPayload({
       target: { type: 'event', id: item.id, kind: item.kind },
       source: { napplet: 'creator-signals' },
       behavior: { focus: true, newWindow: true },
     });
-    if (payload) ipc.emit(NOTE_VIEWER_OPEN_TOPIC, [], JSON.stringify(payload));
+    await invokeNavigation(payload ? createNoteViewerOpenIntentRequest(payload, { behavior: payload.behavior }) : null);
   }
 
-  function openSignalAuthor(signal: CreatorSignal): void {
-    ipc.emit('profile:open', [], JSON.stringify({ pubkey: signal.author }));
+  async function openSignalAuthor(signal: CreatorSignal): Promise<void> {
+    await invokeNavigation(createProfileIntentRequest({ pubkey: signal.author }));
   }
 
   function authorLabel(pubkey: string): string {
