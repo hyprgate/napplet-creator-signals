@@ -80,6 +80,8 @@ export interface CreatorSignal {
   author: string;
   summary: string;
   createdAt: number;
+  /** A repost that adds its own text. */
+  quote?: boolean;
 }
 
 export interface CreatorSnapshot {

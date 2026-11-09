@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCreatorItems,
   contentFromEvent,
+  creatorSignalsForItem,
+  selectedCreatorItem,
   coverageLabel,
   createInitialCreatorSignalsState,
   creatorSignalCounts,
@@ -122,6 +124,63 @@ describe('creator signals store', () => {
     ];
 
     expect(creatorSignalCounts(signals)).toMatchObject({ reply: 2, zap: 1 });
-    expect(coverageLabel({ coverageRelays: ['wss://a.example', 'wss://b.example'], queryWindowDays: 30 })).toBe('2 read relays / 30d query window');
+    expect(coverageLabel({ coverageRelays: ['wss://a.example', 'wss://b.example'], queryWindowDays: 30 })).toBe('what 2 relays returned in the last 30 days');
+  });
+
+  it('credits a zap to its sender and words the amount', () => {
+    const sender = 'c'.repeat(64);
+    const signal = signalFromEvent(event({
+      id: 'zap',
+      kind: 9735,
+      pubkey: 'd'.repeat(64),
+      content: '',
+      tags: [['p', SELF], ['e', NOTE], ['description', JSON.stringify({ kind: 9734, pubkey: sender, content: 'nice', tags: [['amount', '21000']] })]],
+    }), SELF);
+
+    expect(signal?.author).toBe(sender);
+    expect(signal?.targetKey).toBe(NOTE);
+    expect(signal?.summary).toBe('Zapped 21 sats: nice');
+  });
+
+  it('keeps a zap on your profile as other activity instead of dropping it', () => {
+    const signal = signalFromEvent(event({ id: 'zap', kind: 9735, tags: [['p', SELF]], content: '' }), SELF);
+
+    expect(signal?.kind).toBe('zap');
+    expect(signal?.targetKey).toBeNull();
+  });
+
+  it('says what a repost and a reaction mean instead of printing kinds', () => {
+    expect(signalFromEvent(event({ id: 'r', kind: 6, tags: [['e', NOTE], ['p', SELF]] }), SELF)?.summary).toBe('Reposted your post');
+    expect(signalFromEvent(event({ id: 'l', kind: 7, tags: [['e', NOTE], ['p', SELF]], content: '+' }), SELF)?.summary).toBe('Liked this');
+    expect(signalFromEvent(event({ id: 'f', kind: 7, tags: [['e', NOTE], ['p', SELF]], content: '🔥' }), SELF)?.summary).toBe('Reacted 🔥');
+  });
+
+  it('marks a quote so it reads differently from a plain repost', () => {
+    const signal = signalFromEvent(event({ id: 'q', kind: 1, tags: [['q', NOTE], ['p', SELF]], content: 'good point' }), SELF);
+
+    expect(signal?.kind).toBe('repost');
+    expect(signal?.quote).toBe(true);
+    expect(signal?.summary).toBe('good point');
+  });
+
+  it('keeps the detail pane on a visible post that has the filtered kind', () => {
+    const items = [
+      { ...contentFromEvent(event({ id: 'with-zap', kind: 1 }))!, signalIds: ['zap'] },
+      { ...contentFromEvent(event({ id: 'quiet', kind: 1 }))!, signalIds: [] },
+    ];
+    const signals = [{ id: 'zap', kind: 'zap' as const, targetKey: 'with-zap', author: 'a', summary: '', createdAt: 1 }];
+    const state = { ...createInitialCreatorSignalsState(), items, signals, selectedId: 'quiet', filter: 'zap' as const };
+
+    expect(selectedCreatorItem(state)?.id).toBe('with-zap');
+    expect(selectedCreatorItem({ ...state, filter: 'follow' })).toBeNull();
+    expect(creatorSignalsForItem(items[0]!, signals, 'follow')).toEqual([]);
+  });
+
+  it('reads an article summary from its tag, not its markdown', () => {
+    const article = contentFromEvent(event({ kind: 30023, tags: [['d', 'x'], ['title', 'T'], ['summary', 'Short']], content: '# T\n\nBody' }));
+    const untagged = contentFromEvent(event({ kind: 30023, tags: [['d', 'x'], ['title', 'T']], content: '# T\n\nBody' }));
+
+    expect(article?.summary).toBe('Short');
+    expect(untagged?.summary).toBe('Body');
   });
 });

@@ -4,46 +4,24 @@
 > Do not push commits to this standalone napplet repository; direct changes are overwritten by Hyprgate's mirror workflow.
 <!-- HYPRGATE NAPPLET MIRROR NOTICE:END -->
 
-# napplet-creator-signals
+# Creator Signals
 
-[![CI](https://github.com/hyprgate/napplet-creator-signals/actions/workflows/ci.yml/badge.svg)](https://github.com/hyprgate/napplet-creator-signals/actions/workflows/ci.yml)
+See the replies, comments, reactions, reposts and zaps on your recent notes and
+articles, plus who follows you. Counts are what your relays returned over the last
+30 days, so read them as coverage rather than global totals.
 
-Forkable source repository for the Hyprgate built-in napplet currently packaged as `@hyprgate/napp-creator-signals`.
+The source lives in the Hyprgate monorepo at `napplets/creator-signals`. The standalone
+`hyprgate/napplet-creator-signals` repository is a generated, read-only mirror, so send
+changes to [hyprgate/web](https://github.com/hyprgate/web).
 
-This repository was split from `hyprgate/gui` and is mounted back into the parent checkout as `napplets/creator-signals`.
-It still expects the parent workspace when built through Hyprgate because shared `@hyprgate/*` packages remain workspace dependencies.
+## Developing
 
-## Parent checkout
+Run these from the root of a Hyprgate checkout so workspace dependencies resolve:
 
 ```bash
-git clone --recurse-submodules git@github.com:hyprgate/gui.git
-cd gui
 pnpm install --frozen-lockfile
-pnpm --filter @hyprgate/napp-creator-signals build
+pnpm --filter ./napplets/creator-signals paja        # Kehto Paja plus the Vite dev server
+pnpm --filter ./napplets/creator-signals test
+pnpm --filter ./napplets/creator-signals type-check
+pnpm --filter ./napplets/creator-signals conformance # builds, then checks dist/
 ```
-
-## Paja runtime
-
-```bash
-pnpm --filter @hyprgate/napp-creator-signals paja
-```
-
-This starts Kehto Paja and the napplet's Vite dev server together, using
-the port configured in `vite.config.ts`.
-
-## Testing
-
-Run these checks from a Hyprgate parent checkout so workspace dependencies resolve:
-
-```bash
-git clone --recurse-submodules git@github.com:hyprgate/gui.git
-cd gui
-pnpm install --frozen-lockfile
-pnpm --filter @hyprgate/napp-creator-signals conformance
-pnpm --filter @hyprgate/napp-creator-signals test
-pnpm --filter @hyprgate/napp-creator-signals build
-```
-
-The `conformance` script builds the napplet and runs `@napplet/conformance-cli` against `dist/`. CI runs the same conformance, unit test, and build checks for every push and pull request.
-
-CI runs from the standalone napplet repository but checks out `hyprgate/gui` to resolve private `workspace:*` packages. Configure `HYPRGATE_GUI_CHECKOUT_TOKEN` with read access to `hyprgate/gui` before enabling GitHub Actions.

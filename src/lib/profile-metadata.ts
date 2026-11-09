@@ -88,6 +88,8 @@ export function subscribeProfileMetadata(
       try {
         const result = await outbox.query(filters);
         for (const item of result.events) handleEvent(item.event as NostrEvent);
+      } catch {
+        // Names are best-effort: fall through to the npub rather than failing the view.
       } finally {
         if (!closed) handleEose();
       }

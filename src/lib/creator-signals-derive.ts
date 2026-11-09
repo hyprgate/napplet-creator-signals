@@ -11,7 +11,10 @@ import {
   KIND_REPOST,
   KIND_TEXT_NOTE,
   KIND_ZAP_RECEIPT,
+  formatMillisatsAsSats,
+  parseNoteContent,
   parseNoteViewerReply,
+  parseZapReceipt,
 } from '@hyprgate/utils';
 import {
   CREATOR_SNAPSHOT_KEY,
@@ -39,7 +42,9 @@ export function contentFromEvent(event: NostrEvent, coverageRelays: string[] = [
     kind: event.kind,
     type,
     title: titleForEvent(event, type),
-    summary: summarize(event.content, 180),
+    summary: type === 'article'
+      ? firstTagValue(event.tags, 'summary') ?? summarize(event.content.replace(/^#+\s.*$/m, ''), 180)
+      : summarize(event.content, 180),
     createdAt: event.created_at,
     signalIds: [],
     coverageRelays,
@@ -49,7 +54,7 @@ export function contentFromEvent(event: NostrEvent, coverageRelays: string[] = [
 export function signalFromEvent(event: NostrEvent, selfPubkey: string): CreatorSignal | null {
   if (event.kind === KIND_CONTACTS) {
     if (!hasTagValue(event.tags, 'p', selfPubkey) || event.pubkey === selfPubkey) return null;
-    return createSignal(event, 'follow', null, 'Added you to a contact list.');
+    return createSignal(event, 'follow', null, 'Has you in their follow list');
   }
 
   if (event.pubkey === selfPubkey) return null;
@@ -63,29 +68,39 @@ export function signalFromEvent(event: NostrEvent, selfPubkey: string): CreatorS
   }
 
   if (event.kind === KIND_REACTION) {
-    const target = firstTagValue(event.tags, 'e') ?? firstTagValue(event.tags, 'a');
+    const target = lastTagValue(event.tags, 'e') ?? lastTagValue(event.tags, 'a');
     if (!target) return null;
-    return createSignal(event, 'reaction', target, event.content.trim() || '+');
+    return createSignal(event, 'reaction', target, reactionSummary(event.content));
   }
 
   if (event.kind === KIND_REPOST || event.kind === KIND_GENERIC_REPOST) {
-    const target = firstTagValue(event.tags, 'e') ?? firstTagValue(event.tags, 'a');
+    const target = lastTagValue(event.tags, 'e') ?? lastTagValue(event.tags, 'a');
     if (!target) return null;
-    return createSignal(event, 'repost', target, `Reposted kind ${event.kind}.`);
+    return createSignal(event, 'repost', target, 'Reposted your post');
   }
 
   if (event.kind === KIND_ZAP_RECEIPT) {
-    const target = firstTagValue(event.tags, 'e') ?? firstTagValue(event.tags, 'a');
-    if (!target) return null;
-    return createSignal(event, 'zap', target, 'Zap receipt observed.');
+    const zap = parseZapReceipt(event);
+    const target = zap?.targetEventIds[0] ?? zap?.targetAddresses[0] ?? null;
+    const amount = zap?.amountMillisats ? `Zapped ${formatMillisatsAsSats(zap.amountMillisats)}` : 'Zapped you';
+    const signal = createSignal(event, 'zap', target, zap?.comment ? `${amount}: ${summarize(zap.comment, 120)}` : amount);
+    // The receipt is signed by the zap provider; the zapper signed the embedded request.
+    return { ...signal, author: zap?.senderPubkey ?? firstTagValue(event.tags, 'P') ?? event.pubkey };
   }
 
   const quoteTarget = firstTagValue(event.tags, 'q');
   if (event.kind === KIND_TEXT_NOTE && quoteTarget) {
-    return createSignal(event, 'repost', quoteTarget, summarize(event.content, 120));
+    return { ...createSignal(event, 'repost', quoteTarget, summarize(event.content, 120)), quote: true };
   }
 
   return null;
+}
+
+function reactionSummary(content: string): string {
+  const reaction = content.trim();
+  if (reaction === '' || reaction === '+') return 'Liked this';
+  if (reaction === '-') return 'Disliked this';
+  return `Reacted ${reaction}`;
 }
 
 export function buildCreatorItems(contents: CreatorContent[], signals: CreatorSignal[]): CreatorContent[] {
@@ -126,13 +141,14 @@ export function visibleCreatorItems(state: CreatorSignalsState): CreatorContent[
       .toLowerCase()
       .includes(q);
     if (!matchesQuery) return false;
-    if (state.filter === 'all' || state.filter === 'follow') return true;
+    if (state.filter === 'all') return true;
     return item.signalIds.some((id) => signalById.get(id)?.kind === state.filter);
   });
 }
 
 export function selectedCreatorItem(state: CreatorSignalsState): CreatorContent | null {
-  return state.items.find((item) => item.id === state.selectedId) ?? visibleCreatorItems(state)[0] ?? null;
+  const visible = visibleCreatorItems(state);
+  return visible.find((item) => item.id === state.selectedId) ?? visible[0] ?? null;
 }
 
 export function creatorSignalsForItem(item: CreatorContent | null, signals: CreatorSignal[], filter: CreatorFilter): CreatorSignal[] {
@@ -140,7 +156,7 @@ export function creatorSignalsForItem(item: CreatorContent | null, signals: Crea
   const ids = new Set(item.signalIds);
   return signals
     .filter((signal) => ids.has(signal.id))
-    .filter((signal) => filter === 'all' || filter === 'follow' || signal.kind === filter)
+    .filter((signal) => filter === 'all' || signal.kind === filter)
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
@@ -166,8 +182,8 @@ export function itemSignalCounts(item: CreatorContent, signals: CreatorSignal[])
 
 export function coverageLabel(state: Pick<CreatorSignalsState, 'coverageRelays' | 'queryWindowDays'>): string {
   const count = state.coverageRelays.length;
-  const relayWord = count === 1 ? 'relay' : 'relays';
-  return `${count} read ${relayWord} / ${state.queryWindowDays}d query window`;
+  const source = count === 0 ? 'your relays' : `${count} ${count === 1 ? 'relay' : 'relays'}`;
+  return `what ${source} returned in the last ${state.queryWindowDays} days`;
 }
 
 export function readableRelays(relays: Record<string, RelayMode>): string[] {
@@ -248,8 +264,27 @@ function firstTagValue(tags: string[][], name: string): string | null {
   return tags.find((tag) => tag[0] === name && tag[1])?.[1] ?? null;
 }
 
+function lastTagValue(tags: string[][], name: string): string | null {
+  return tags.filter((tag) => tag[0] === name && tag[1]).at(-1)?.[1] ?? null;
+}
+
+/** Note text as a person reads it: entities stay short and whitespace collapses. */
+function readableText(content: string): string {
+  return parseNoteContent(content).map((block) => {
+    switch (block.type) {
+      case 'text': return block.value;
+      case 'profile': return '@someone';
+      case 'event':
+      case 'address': return '[linked note]';
+      case 'media':
+      case 'resource': return block.mediaType === 'image' ? '[image]' : '[video]';
+      default: return block.source;
+    }
+  }).join('');
+}
+
 function summarize(content: string, maxLength: number): string {
-  const trimmed = content.trim().replace(/\s+/g, ' ');
-  if (!trimmed) return 'No text content';
+  const trimmed = readableText(content).trim().replace(/\s+/g, ' ');
+  if (!trimmed) return 'No text';
   return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}...` : trimmed;
 }
